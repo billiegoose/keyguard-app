@@ -50,6 +50,10 @@ class PasskeyUtils(
          */
         private const val PASSKEY_PROCESSING_MIN_TIME_MS = 800L
 
+        // https://www.w3.org/TR/webauthn-3/#prf-extension
+        // "WebAuthn PRF" followed by a null byte, as required by the spec.
+        internal val PRF_LABEL = "WebAuthn PRF\u0000".toByteArray(Charsets.UTF_8)
+
         suspend fun <T> withProcessingMinTime(
             block: suspend () -> T,
         ): T = coroutineScope {
@@ -406,6 +410,20 @@ class PasskeyUtils(
 
     fun generateCredentialId() = cryptoService.uuid()
 
+    /** Generates a fresh 32-byte random secret to use as the PRF key for a new credential. */
+    fun generatePrfSecret(): ByteArray = cryptoService.seed(32)
+
+    /**
+     * Computes the WebAuthn PRF output for the given PRF secret and input.
+     *
+     * prfSalt   = SHA-256("WebAuthn PRF\x00" || prfInput)
+     * prfOutput = HMAC-SHA-256(prfSecretBytes, prfSalt)
+     */
+    fun computePrf(
+        prfSecretBytes: ByteArray,
+        prfInput: ByteArray,
+    ): ByteArray = computeWebAuthnPrf(cryptoService, prfSecretBytes, prfInput)
+
     // See:
     // https://github.com/1Password/passkey-rs/blob/90c1c282649eceeb7cbe771bb8ce17b1b8463c60/passkey-client/src/lib.rs#L407
     // https://github.com/kanidm/webauthn-rs/blame/25bc74ac0dc4280bf67ed3ff53fdf804dbb142c2/webauthn-rs-core/src/core.rs#L866
@@ -548,4 +566,28 @@ class PasskeyUtils(
             .bind()
         return appInfo.getOrigin(privilegedAllowlist)
     }
+}
+
+/**
+ * Standalone PRF computation, extracted for testability.
+ *
+ * Implements the WebAuthn PRF extension computation as a software authenticator.
+ * This mirrors what a hardware authenticator does with its internal credRandom key:
+ *
+ *   prfSalt   = SHA-256("WebAuthn PRF\x00" || prfInput)
+ *   prfOutput = HMAC-SHA-256(prfSecretBytes, prfSalt)
+ *
+ * The [prfSecretBytes] parameter is the "credRandom" equivalent — a 32-byte random
+ * secret generated at credential creation time and stored alongside the credential.
+ */
+internal fun computeWebAuthnPrf(
+    cryptoService: CryptoGenerator,
+    prfSecretBytes: ByteArray,
+    prfInput: ByteArray,
+): ByteArray {
+    val prfSalt = cryptoService.hashSha256(PasskeyUtils.PRF_LABEL + prfInput)
+    return cryptoService.hmacSha256(
+        key = prfSecretBytes,
+        data = prfSalt,
+    )
 }
